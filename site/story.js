@@ -1169,22 +1169,30 @@ if(lenis){lenis.stop();lenis.on('scroll',ScrollTrigger.update);gsap.ticker.add(t
 root.customerMotion={lenis,gsapVersion:gsap.version,scrollTriggerVersion:ScrollTrigger.version,reduced,scrub:.65};
 root.querySelectorAll('a[href^="#"]').forEach(a=>a.addEventListener('click',e=>{const target=root.querySelector(a.getAttribute('href'));if(!target)return;e.preventDefault();closeMenu();const finish=()=>{target.setAttribute('tabindex','-1');target.focus({preventScroll:true});history.replaceState(null,'',a.getAttribute('href'));};if(lenis)lenis.scrollTo(target,{offset:-110,onComplete:finish});else{target.scrollIntoView();finish();}}));
 let variant=innerWidth<=650?'mobile':'desktop';
-const cache=new Map();
+const cache=new Map(),compressed=new Map(),fetching=new Map(),decodedEver=new Set(),failedSheets=new Set();
+let backgroundStarted=false,fetchComplete=false,decodeBusy=false;
+const started=performance.now();
 const frames=s=>m.devices[variant].shots[s==='S1'?'push':'lights-off'].frames;
 const motion={S1:0,S6:0};
-let scene='S1',target=0,ticking=false,interacted=false,visible=true,loading=false,wanted=[],generation=0,lastTarget=0,direction=1;
+let scene='S1',target=0,ticking=false,interacted=false,visible=true,wanted=[],generation=0,lastTarget=0,direction=1;
 root.customerState={variant,reduced,scene,target,drawn:-1,errors:[],loaded:{S1:0,S6:0},requested:[],preloadComplete:false,cacheSheets:0,decodedBytes:0};
 function stats(){Object.assign(root.customerState,{cacheSheets:cache.size,decodedBytes:[...cache.values()].reduce((n,img)=>n+img.width*img.height*4,0),loaded:Object.fromEntries(['S1','S6'].map(s=>[s,frames(s).filter(f=>cache.has(f.atlas_url)).length]))});}
 function paint(){if(!visible&&root.customerState.drawn!==-1)return;const available=frames(scene).filter(f=>cache.has(f.atlas_url));if(!available.length)return;const f=available.reduce((a,b)=>Math.abs(b.index-target)<Math.abs(a.index-target)?b:a),img=cache.get(f.atlas_url),scale=Math.max(root.clientWidth/f.width,innerHeight/f.height),x=(root.clientWidth-f.width*scale)/2,y=(innerHeight-f.height*scale)/2;
+if(root.customerState.scene===scene&&root.customerState.drawn===f.index&&root.customerState.canvasWidth===canvas.width&&root.customerState.canvasHeight===canvas.height){root.customerState.target=target;return;}
 ctx.drawImage(img,f.x,f.y,f.width,f.height,x,y,f.width*scale,f.height*scale);
+Object.assign(root.customerState,{canvasWidth:canvas.width,canvasHeight:canvas.height});
 Object.assign(root.customerState,{variant,scene,target,drawn:f.index,atlas:f.atlas_url,crop:[f.x,f.y,f.width,f.height],projection:{method:'atlas crop, centered cover; native camera only',source:[f.width,f.height],decoded:[img.width,img.height],scale,image:{x,y,width:f.width*scale,height:f.height*scale}}});}
-async function pump(){if(new URL(root.dataset.assetBase).hostname.endsWith('.invalid'))return;if(loading)return;const url=wanted.find(u=>!cache.has(u));if(!url)return;loading=true;const epoch=generation;root.customerState.requested.push(url);
-try{const response=await fetch(url);if(!response.ok)throw Error(`${url}: ${response.status}`);const blob=await response.blob();if(epoch!==generation)return;
-// Retain the displayed sheet until the next sheet has decoded.
-const img=await createImageBitmap(blob);if(epoch!==generation){img.close();return;}cache.set(url,img);stats();root.customerState.preloadComplete=true;paint();
-while(cache.size>4){const keep=new Set([root.customerState.atlas,...wanted]);const drop=[...cache.keys()].find(k=>!keep.has(k));if(!drop)break;cache.get(drop).close();cache.delete(drop);}stats();
-const initial=[...new Set(frames('S1').map(f=>f.atlas_url))].slice(0,2);if(root.dataset.loading==='true'&&initial.every(u=>cache.has(u))){root.dataset.loading='false';root.customerState.initialSheetsReady=true;if(lenis)lenis.start();ScrollTrigger.refresh();}
-}catch(e){root.customerState.errors.push(String(e));wanted=wanted.filter(u=>u!==url);if(root.dataset.loading==='true')root.storyFail('Building images could not load. Please reload or use the energy check link.');}finally{loading=false;pump();}}
+const sheets=s=>[...new Set(frames(s).map(f=>f.atlas_url))];
+function fetchSheet(url){if(compressed.has(url))return Promise.resolve(compressed.get(url));if(fetching.has(url))return fetching.get(url);root.customerState.requested.push(url);const epoch=generation,pending=fetch(url).then(async r=>{if(!r.ok)throw Error(`${url}: ${r.status}`);const blob=await r.blob();if(epoch===generation)compressed.set(url,blob);return blob;}).finally(()=>fetching.delete(url));fetching.set(url,pending);return pending;}
+function startBackground(){if(backgroundStarted)return;backgroundStarted=true;const epoch=generation,queue=[...sheets('S1'),...sheets('S6')];let cursor=0,workers=4;for(let n=0;n<4;n++)(async()=>{while(cursor<queue.length&&epoch===generation){const url=queue[cursor++];try{await fetchSheet(url);pump();}catch(e){if(epoch===generation){failedSheets.add(url);root.customerState.errors.push(String(e));}}}if(epoch===generation&&!--workers){fetchComplete=true;root.customerState.allFetchedMs=performance.now()-started;pump();}})();}
+async function pump(){if(new URL(root.dataset.assetBase).hostname.endsWith('.invalid')||decodeBusy)return;const all=[...sheets('S1'),...sheets('S6')],url=wanted.find(u=>!cache.has(u)&&!failedSheets.has(u))||all.find(u=>compressed.has(u)&&!decodedEver.has(u)&&!failedSheets.has(u));if(!url){root.customerState.preloadComplete=fetchComplete&&all.every(u=>decodedEver.has(u));return;}decodeBusy=true;const epoch=generation;
+try{const blob=await fetchSheet(url);if(epoch!==generation)return;
+// Include the incoming bitmap in the residency cap; never evict the displayed sheet.
+const limit=variant==='mobile'?3:4;while(cache.size>=limit){const drop=[...cache.keys()].find(k=>k!==root.customerState.atlas&&!wanted.includes(k))||[...cache.keys()].find(k=>k!==root.customerState.atlas);if(!drop)break;cache.get(drop).close();cache.delete(drop);}
+const img=await createImageBitmap(blob);if(epoch!==generation){img.close();return;}cache.set(url,img);decodedEver.add(url);stats();paint();if(!wanted.includes(url)&&root.customerState.atlas!==url){img.close();cache.delete(url);}stats();const push=sheets('S1');root.customerState.pushDecodedSheets=push.filter(u=>decodedEver.has(u)).length;root.customerState.compressedBytes=[...compressed.values()].reduce((n,b)=>n+b.size,0);root.customerState.decodedBudgetSheets=limit;if(root.customerState.pushDecodedSheets===40&&!root.customerState.pushAllDecodedMs)root.customerState.pushAllDecodedMs=performance.now()-started;
+const initial=push.slice(0,2);if(root.dataset.loading==='true'&&initial.every(u=>cache.has(u))){root.dataset.loading='false';root.customerState.initialSheetsReady=true;if(lenis)lenis.start();ScrollTrigger.refresh();}
+if(!backgroundStarted)requestAnimationFrame(()=>requestAnimationFrame(startBackground));
+}catch(e){if(epoch===generation){failedSheets.add(url);root.customerState.errors.push(String(e));if(root.dataset.loading==='true')root.storyFail('Building images could not load. Please reload or use the energy check link.');}}finally{if(epoch===generation){decodeBusy=false;setTimeout(pump,0);}}}
 function add(s,i){i=Math.max(0,Math.min(frames(s).length-1,i));const sheets=[...new Set(frames(s).map(f=>f.atlas_url))],current=frames(s)[i].atlas_url,n=sheets.indexOf(current);wanted=root.dataset.loading==='true'?[...new Set(frames('S1').map(f=>f.atlas_url))].slice(0,2):[current,sheets[n+direction],sheets[n-direction]].filter(Boolean);pump();}
 function measure(){const opening=$('#opening'),resolution=$('#resolution'),openingTop=opening.getBoundingClientRect().top+scrollY,resolutionTop=resolution.getBoundingClientRect().top+scrollY,progress=Math.max(0,Math.min(1,(scrollY-openingTop)/Math.max(1,opening.offsetHeight-innerHeight)));
 const oi=$('#opening .inner');if(oi)oi.style.opacity=reduced?1:Math.max(0,1-progress/.06);
@@ -1193,7 +1201,7 @@ target=reduced?(scene==='S6'?119:0):Math.round(motion[scene]);
 direction=target===lastTarget?direction:target>lastTarget?1:-1;lastTarget=target;
 if(visible||root.customerState.drawn===-1)add(scene,target);
 paint();}
-function resize(){const next=innerWidth<=650?'mobile':'desktop';if(next!==variant){generation++;variant=next;wanted=[];for(const img of cache.values())img.close();cache.clear();root.customerState.drawn=-1;stats();}const d=Math.min(devicePixelRatio,2);canvas.width=root.clientWidth*d;canvas.height=innerHeight*d;ctx.setTransform(d,0,0,d,0,0);measure();}
+function resize(){const next=innerWidth<=650?'mobile':'desktop';if(next!==variant){generation++;variant=next;wanted=[];backgroundStarted=false;fetchComplete=false;decodeBusy=false;compressed.clear();decodedEver.clear();failedSheets.clear();root.customerState.pushAllDecodedMs=null;for(const img of cache.values())img.close();cache.clear();root.customerState.drawn=-1;stats();}const d=Math.min(devicePixelRatio,2);canvas.width=root.clientWidth*d;canvas.height=innerHeight*d;ctx.setTransform(d,0,0,d,0,0);measure();}
 if(!reduced)for(const [shot,id,last]of [['S1','opening',239],['S6','resolution',119]])gsap.to(motion,{[shot]:last,ease:'none',scrollTrigger:{id:'sgnergy-'+shot,trigger:$('#'+id),start:'top top',end:'bottom bottom',scrub:.65,invalidateOnRefresh:true},onUpdate:measure});
 add('S1',0);resize();ScrollTrigger.refresh();addEventListener('resize',resize);document.addEventListener('visibilitychange',measure);addEventListener('scroll',()=>{if(scrollY>0)interacted=true;if(!ticking){ticking=true;requestAnimationFrame(()=>{measure();ticking=false;});}},{passive:true});
 }catch(e){root.storyFail('The story could not initialize. Please reload or use the energy check link.');console.error(e);}
