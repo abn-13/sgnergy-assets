@@ -1207,3 +1207,20 @@ add('S1',0);resize();ScrollTrigger.refresh();addEventListener('resize',resize);d
 }catch(e){root.storyFail('The story could not initialize. Please reload or use the energy check link.');console.error(e);}
 const wrapper=document.getElementById('sgnergy-story');for(const a of wrapper.querySelectorAll('[data-asset-link]'))a.href=new URL(a.dataset.assetLink,wrapper.dataset.assetBase).href;
 })();
+
+(() => {
+  if (document.querySelector('.sg-chat, #sgnergy-chat-script')) return;
+  const base = 'https://abn-13.github.io/sgnergy-assets/site/';
+  if (!document.getElementById('sgnergy-chat-style')) {
+    const style = document.createElement('link');
+    style.id = 'sgnergy-chat-style';
+    style.rel = 'stylesheet';
+    style.href = base + 'chat.css';
+    document.head.append(style);
+  }
+  const script = document.createElement('script');
+  script.id = 'sgnergy-chat-script';
+  script.src = base + 'chat.js';
+  script.dataset.endpoint = 'https://sgnergy-ask-chatbot.sgnergy-chatbot.workers.dev/chat';
+  document.head.append(script);
+})();
